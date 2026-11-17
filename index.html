@@ -550,6 +550,11 @@ function adoptUrlSession() {
     return Promise.resolve({ error: "That link has expired or was already used. If you confirmed your email, sign in with your password." });
   }
   return req("/auth/v1/user", { headers: { Authorization: "Bearer " + q.access_token } }).then(function (u) {
+    // A link must never swap a signed-in visitor into a different account.
+    if (session && session.user && u && session.user.id !== u.id && !expired(session)) {
+      to("#/path");
+      return { error: "You are already signed in as " + (session.user.email || "another account") + ". Sign out first to use this link." };
+    }
     session = normalise({ access_token: q.access_token, refresh_token: q.refresh_token,
       expires_in: +q.expires_in || 3600, user: u });
     writeSession(session);
@@ -3513,7 +3518,14 @@ function awaitEntitlement(tier, tries) {
 }
 
 DB.adoptUrlSession()
-  .then(function (a) { if (a && a.error) authMsg = "!" + a.error; return DB.catalogue(); })
+  .then(function (a) {
+    if (a && a.error) authMsg = "!" + a.error;
+    // Say which account the link signed in, so a wrong one is noticed.
+    if (a && a.session && a.session.user) setTimeout(function () {
+      toast("Signed in as " + (a.session.user.email || "your account"));
+    }, 1500);
+    return DB.catalogue();
+  })
   .then(function (cat) {
     C = cat; rebuildIndex();
     MISSING = PATH_LESSONS.filter(function (id) { return !L[id]; });
