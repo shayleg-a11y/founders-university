@@ -519,7 +519,7 @@ function normalise(s) {
 
 /* ----------------------------------------------------------------- auth -- */
 function signUp(email, password, displayName) {
-  return req("/auth/v1/signup", {
+  return req("/auth/v1/signup?redirect_to=" + encodeURIComponent(location.origin + location.pathname), {
     method: "POST",
     headers: { Authorization: "Bearer " + ANON },
     body: { email: email, password: password, data: { display_name: displayName || "" } }
@@ -528,6 +528,35 @@ function signUp(email, password, displayName) {
     var s = normalise(r);
     if (s) { session = s; writeSession(s); }
     return { session: s, needsConfirmation: !s, user: r && r.user };
+  });
+}
+
+// Email links (confirm, reset) come back as "#access_token=..." or "#error=...", which is
+// not a route. Take the session or the error out of the address bar before the router runs.
+function adoptUrlSession() {
+  var h = (window.location.hash || "").replace(/^#\/?/, "");
+  if (!/(^|&)(access_token|error_description|error_code)=/.test(h)) return Promise.resolve(null);
+  var q = {};
+  h.split("&").forEach(function (kv) {
+    var i = kv.indexOf("=");
+    if (i > 0) { try { q[kv.slice(0, i)] = decodeURIComponent(kv.slice(i + 1).replace(/\+/g, " ")); } catch (e) {} }
+  });
+  function to(route) {
+    try { history.replaceState(null, "", location.pathname + location.search + route); }
+    catch (e) { location.hash = route; }
+  }
+  to("#/signin");
+  if (!q.access_token) {
+    return Promise.resolve({ error: "That link has expired or was already used. If you confirmed your email, sign in with your password." });
+  }
+  return req("/auth/v1/user", { headers: { Authorization: "Bearer " + q.access_token } }).then(function (u) {
+    session = normalise({ access_token: q.access_token, refresh_token: q.refresh_token,
+      expires_in: +q.expires_in || 3600, user: u });
+    writeSession(session);
+    to("#/path");
+    return { session: session };
+  }).catch(function () {
+    return { error: "Your email is confirmed. Sign in with your password." };
   });
 }
 
@@ -738,7 +767,14 @@ function myApplication() {
     .catch(function () { return null; });
 }
 function adminApplications() {
-  return sel("applications", "select=*&order=created_at.desc&limit=500");
+  return Promise.all([
+    sel("applications", "select=*&order=created_at.desc&limit=500"),
+    sel("application_schedule", "select=application_id,accept_at&limit=1000").catch(function () { return []; })
+  ]).then(function (r) {
+    var at = {};
+    (r[1] || []).forEach(function (x) { at[x.application_id] = x.accept_at; });
+    return (r[0] || []).map(function (a) { a.accept_at = at[a.id] || null; return a; });
+  });
 }
 function adminDecide(id, status) {
   var decided = status === "accepted" || status === "declined";
@@ -756,11 +792,11 @@ function adminStudents() {
   return Promise.all([
     sel("profiles", "select=id,email,display_name,track,created_at&order=created_at.desc&limit=1000"),
     sel("entitlements", "select=user_id,tier,status,source,granted_at&order=granted_at"),
-    sel("lesson_progress", "select=user_id")
+    rpc("admin_lesson_counts")
   ]).then(function (r) {
     var ents = {}, done = {};
     (r[1] || []).forEach(function (e) { (ents[e.user_id] = ents[e.user_id] || []).push(e); });
-    (r[2] || []).forEach(function (x) { done[x.user_id] = (done[x.user_id] || 0) + 1; });
+    (r[2] || []).forEach(function (x) { done[x.user_id] = +x.n || 0; });
     return (r[0] || []).map(function (p) {
       p.entitlements = ents[p.id] || []; p.lessons_done = done[p.id] || 0; return p;
     });
@@ -777,6 +813,7 @@ return {
   markLesson: markLesson, recordQuiz: recordQuiz, recordSim: recordSim,
   setMilestone: setMilestone, saveFit: saveFit, saveProfile: saveProfile,
   submitApplication: submitApplication,
+  adoptUrlSession: adoptUrlSession,
   amAdmin: amAdmin, myApplication: myApplication,
   adminApplications: adminApplications, adminDecide: adminDecide, adminStudents: adminStudents
 };
@@ -1958,7 +1995,7 @@ function vHome() {
   var pp = pathProgress();
   var hero =
   '<div class="hero"><div class="wrap">' +
-    '<div class="eyebrow">Decisions arrive within 24 hours &middot; Reviewed personally</div>' +
+    '<div class="eyebrow">By application &middot; Decisions within 24 hours</div>' +
     '<h1>From idea to exit.<i>One student at a time.</i></h1>' +
     '<p class="lede">A premium program built around the business you actually have. Eight modules, ' +
       TOTAL_MIN ? "" : "" +
@@ -1967,7 +2004,7 @@ function vHome() {
   // build properly (avoid the ternary above)
   hero =
   '<div class="hero"><div class="wrap">' +
-    '<div class="eyebrow">Decisions arrive within 24 hours &middot; Reviewed personally, never automatically</div>' +
+    '<div class="eyebrow">By application &middot; Decisions within 24 hours</div>' +
     '<h1>From idea to exit.<i>One student at a time.</i></h1>' +
     '<p class="lede">A premium program built around the business you actually have &mdash; your niche, your constraints, your ambition. Eight modules, ' +
       ALL_LESSONS.length + ' lessons, ' + SIMS.length + ' business simulations, and a capstone that ends in an exit-ready business plan.</p>' +
@@ -2044,7 +2081,7 @@ function vHome() {
     '<div class="grid g4">' +
       '<div class="card tier"><div class="chip">Step one</div><h4 style="font-size:19px;margin-top:14px">The Application</h4>' +
         '<div class="price">Free</div><div class="small">Reasoning assessment and two essays</div>' +
-        '<ul><li>Two written questions</li><li>Reviewed personally</li><li>Decision within 24 hours</li></ul>' +
+        '<ul><li>Two written questions</li><li>Free to apply</li><li>Decision within 24 hours</li></ul>' +
         '<button class="btn btn-ghost btn-sm" data-go="#/apply">Apply</button></div>' +
       '<div class="card tier' + (bought("founder-fit") ? " feature" : "") + '"><div class="chip">Step two</div>' +
         '<h4 style="font-size:19px;margin-top:14px">Founder Fit</h4>' +
@@ -2730,7 +2767,7 @@ function vApplyStatus() {
     body = '<div class="eyebrow">Under review</div>' +
       '<h3 style="font-size:24px;margin-bottom:12px">Your application is with admissions</h3>' +
       '<p style="color:var(--fg-2);max-width:60ch">Submitted ' + esc(fmtDate(MY_APP.created_at)) +
-        '. Applications are read personally and a decision arrives within 24 hours. It will appear here and on your Progress page.</p>' +
+        '. A decision arrives within 24 hours. It will appear here and on your Progress page.</p>' +
       '<div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:8px">' +
         '<button class="btn btn-gold btn-sm" data-go="#/library">Read the open lessons</button>' +
         '<button class="btn btn-ghost btn-sm" data-go="#/fit">Founder Fit</button></div>';
@@ -2974,7 +3011,9 @@ function adminAppCard(a) {
       '<div style="min-width:0;flex:1 1 200px"><b style="font-size:17px;overflow-wrap:anywhere">' + esc(a.display_name || "No name given") + '</b>' +
         '<div class="small" style="margin-top:3px;overflow-wrap:anywhere">' +
           (a.email ? '<a href="mailto:' + esc(encodeURIComponent(a.email).replace(/%40/g, "@")) + '" style="color:var(--gold-2)">' + esc(a.email) + '</a>' : 'No email') +
-          ' &middot; ' + esc(a.track || "no track") + ' &middot; ' + esc(fmtDate(a.created_at)) + '</div></div>' +
+          ' &middot; ' + esc(a.track || "no track") + ' &middot; ' + esc(fmtDate(a.created_at)) +
+          (a.status === "submitted" && a.accept_at ? '<br>Accepts automatically ' + esc(new Date(a.accept_at).toLocaleString()) : '') +
+          '</div></div>' +
       '<span class="' + st[1] + '">' + esc(st[0]) + '</span></div>' +
     '<div class="eyebrow mute" style="margin-top:16px">Business</div>' +
     '<p style="margin:4px 0 0;color:var(--fg-2);overflow-wrap:anywhere;white-space:pre-wrap">' + esc(a.business || "\u2014") + '</p>' +
@@ -3291,7 +3330,7 @@ function bind() {
         ? DB.signUp(em.trim(), pw, nm.trim()).then(function (r) {
             if (r.needsConfirmation) {
               authBusy = false;
-              authMsg = "Check your email to confirm the address, then sign in.";
+              authMsg = "Check your email and confirm the address, then come back here and sign in.";
               render._keepScroll = true; render();
               return null;
             }
@@ -3473,7 +3512,8 @@ function awaitEntitlement(tier, tries) {
   });
 }
 
-DB.catalogue()
+DB.adoptUrlSession()
+  .then(function (a) { if (a && a.error) authMsg = "!" + a.error; return DB.catalogue(); })
   .then(function (cat) {
     C = cat; rebuildIndex();
     MISSING = PATH_LESSONS.filter(function (id) { return !L[id]; });
