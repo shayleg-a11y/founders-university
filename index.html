@@ -730,8 +730,11 @@ function myApplication() {
   var own = "user_id.eq." + u.id;
   if (u.email) own += ',email.eq."' + String(u.email).toLowerCase().replace(/["\\]/g, "") + '"';
   return sel("applications", "select=id,status,created_at,decided_at,track&or=" +
-      encodeURIComponent("(" + own + ")") + "&order=created_at.desc&limit=1")
-    .then(function (r) { return r && r[0] ? r[0] : null; })
+      encodeURIComponent("(" + own + ")") + "&order=created_at.desc&limit=20")
+    .then(function (r) {
+      r = r || [];
+      return r.filter(function (a) { return a.status === "accepted"; })[0] || r[0] || null;
+    })
     .catch(function () { return null; });
 }
 function adminApplications() {
@@ -739,7 +742,8 @@ function adminApplications() {
 }
 function adminDecide(id, status) {
   var decided = status === "accepted" || status === "declined";
-  return authed("/rest/v1/applications?id=eq." + encodeURIComponent(id), {
+  return authed("/rest/v1/applications?id=eq." + encodeURIComponent(id) +
+      (status === "reviewing" ? "&status=in.(accepted,declined)" : "&status=in.(submitted,reviewing)"), {
     method: "PATCH",
     headers: { Prefer: "return=representation" },
     body: { status: status, decided_at: decided ? new Date().toISOString() : null }
@@ -2939,12 +2943,14 @@ function fmtDate(iso) {
 function loadAdmin() {
   if (ADMIN === "loading") return;
   ADMIN = "loading";
+  var uid = DB.userId();
+  function stale() { return !IS_ADMIN || DB.userId() !== uid; }
   Promise.all([DB.adminApplications(), DB.adminStudents()]).then(function (r) {
-    ADMIN = { apps: r[0] || [], students: r[1] || [] };
+    ADMIN = stale() ? null : { apps: r[0] || [], students: r[1] || [] };
   }).catch(function (e) {
-    ADMIN = { apps: [], students: [], error: (e && e.message) || "Could not load" };
+    ADMIN = stale() ? null : { apps: [], students: [], error: (e && e.message) || "Could not load" };
   }).then(function () {
-    if (parse().r === "admin") { render._keepScroll = true; render(); }
+    if (!stale() && parse().r === "admin") { render._keepScroll = true; render(); }
   });
 }
 function adminTotals() {
@@ -2967,7 +2973,7 @@ function adminAppCard(a) {
     '<div style="display:flex;gap:10px;justify-content:space-between;align-items:flex-start;flex-wrap:wrap">' +
       '<div style="min-width:0;flex:1 1 200px"><b style="font-size:17px;overflow-wrap:anywhere">' + esc(a.display_name || "No name given") + '</b>' +
         '<div class="small" style="margin-top:3px;overflow-wrap:anywhere">' +
-          (a.email ? '<a href="mailto:' + esc(a.email) + '" style="color:var(--gold-2)">' + esc(a.email) + '</a>' : 'No email') +
+          (a.email ? '<a href="mailto:' + esc(encodeURIComponent(a.email).replace(/%40/g, "@")) + '" style="color:var(--gold-2)">' + esc(a.email) + '</a>' : 'No email') +
           ' &middot; ' + esc(a.track || "no track") + ' &middot; ' + esc(fmtDate(a.created_at)) + '</div></div>' +
       '<span class="' + st[1] + '">' + esc(st[0]) + '</span></div>' +
     '<div class="eyebrow mute" style="margin-top:16px">Business</div>' +
@@ -3216,7 +3222,7 @@ function bind() {
       };
       setBusy(true);
       DB.adminDecide(aid, nst).then(function (row) {
-        var rec = ADMIN.apps.filter(function (a) { return a.id === aid; })[0];
+        var rec = ADMIN.apps.filter(function (a) { return String(a.id) === aid; })[0];
         if (rec) { rec.status = row.status; rec.decided_at = row.decided_at; }
         // Swap just this card and the totals; a full render would replay the page fade.
         var cur = document.getElementById("app-" + aid);
@@ -3226,7 +3232,9 @@ function bind() {
         toast(nst === "accepted" ? "Application accepted" : nst === "declined" ? "Application declined" : "Application reopened");
       }).catch(function (e) {
         setBusy(false);
-        toast("Could not save: " + ((e && e.message) || "try again"));
+        toast(e && e.message === "Not permitted"
+          ? "Not saved. It may already have been decided. Refresh the list."
+          : "Could not save: " + ((e && e.message) || "try again"));
       });
       return;
     }
@@ -3251,7 +3259,14 @@ function bind() {
           if (a) MY_APP = a;
           if (parse().r === "apply" || parse().r === "dashboard") { render._keepScroll = true; render(); }
         });
-      }).catch(function () { /* application is best-effort; never block the visitor */ });
+      }).catch(function () {
+        if (!DB.signedIn()) return;
+        return DB.myApplication().then(function (a) {
+          MY_APP = a;
+          if (!a) toast("Your application did not save. Please submit it again.");
+          if (parse().r === "apply" || parse().r === "dashboard") { render._keepScroll = true; render(); }
+        });
+      });
       applyAgain = false;
       if (DB.signedIn()) {
         MY_APP = { status: "submitted", created_at: new Date().toISOString(), decided_at: null, track: S.track };
@@ -3406,6 +3421,7 @@ function syncFromServer() {
     IS_ADMIN = false; MY_APP = null; ADMIN = null;
     return Promise.resolve();
   }
+  IS_ADMIN = false; MY_APP = null; ADMIN = null;
   return Promise.all([DB.entitlements(), DB.loadProgress(), DB.amAdmin(), DB.myApplication()]).then(function (r) {
     var ents = r[0] || [], prog = r[1];
     IS_ADMIN = r[2] === true; MY_APP = r[3] || null; ADMIN = null;
