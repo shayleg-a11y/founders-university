@@ -1925,6 +1925,8 @@ function payButton(tier, cls) {
   if (uid) link += (link.indexOf("?") > -1 ? "&" : "?") + "client_reference_id=" + encodeURIComponent(uid);
   return '<a class="btn ' + (cls || "btn-gold") + ' btn-sm" href="' + esc(link) + '" rel="noopener">' +
     'Pay $' + t.amount.toLocaleString() + '</a>' +
+    '<div class="small" style="margin-top:8px;flex-basis:100%">All sales are final. <a href="#/refunds" style="color:var(--gold-2)">Refund Policy</a> &middot; ' +
+      '<a href="#/terms" style="color:var(--gold-2)">Terms</a></div>' +
     (PAY.isTest()
       ? '<div class="small" style="margin-top:8px;color:var(--warn)">Test mode &mdash; no charge is made</div>'
       : '');
@@ -1989,9 +1991,10 @@ function foot() {
     '<div style="margin-top:6px">From idea to exit. One student at a time.</div></div>' +
     '<div style="display:flex;gap:22px;flex-wrap:wrap">' +
       '<a href="#/path">Curriculum</a><a href="#/tracks">Tracks</a><a href="#/fit">Founder Fit</a>' +
-      '<a href="#/glossary">Glossary</a><a href="#/dashboard">Progress</a></div>' +
+      '<a href="#/glossary">Glossary</a><a href="#/dashboard">Progress</a>' +
+      '<a href="#/terms">Terms</a><a href="#/refunds">Refund Policy</a><a href="#/privacy">Privacy</a></div>' +
     '<div style="max-width:330px">Educational program. Not legal, tax, or investment advice. ' +
-      'No business outcome is guaranteed. Sign in to keep your progress across devices.</div>' +
+      'No business outcome is guaranteed. All sales are final. Operated by Sophic LLC.</div>' +
     '</div></footer>';
 }
 
@@ -2486,7 +2489,7 @@ function lockedLesson(meta, c, s) {
           : '<button class="btn btn-gold btn-sm" data-go="#/apply">Apply free</button>' +
             '<button class="btn btn-ghost btn-sm" data-go="#/signin">Sign in</button>') +
       '</div>' +
-      '<p class="small" style="margin:14px 0 0">Tuition is $' + PAY.tiers.university.amount.toLocaleString() + ', paid once. Applying is free.</p>' +
+      '<p class="small" style="margin:14px 0 0">Tuition is $' + PAY.tiers.university.amount.toLocaleString() + ', paid once. Applying is free. All sales are final: <a href="#/refunds" style="color:var(--gold-2)">no refunds</a>.</p>' +
       '<p class="small" style="margin:16px 0 0">' +
         'Eight lessons are open to everyone &mdash; ' +
         '<a href="#/library" style="color:var(--gold-2)">the opening lesson of each school</a>.</p>' +
@@ -2742,7 +2745,7 @@ function vDash() {
 // Shared wording for the cost of the programme, always read from PAY.
 function tuitionLine() {
   return '<p class="small" style="margin:14px 0 0">Tuition is $' + PAY.tiers.university.amount.toLocaleString() +
-    ', paid once. Applying is free.</p>';
+    ', paid once. Applying is free. All sales are final: <a href="#/refunds" style="color:var(--gold-2)">no refunds</a>.</p>';
 }
 function appPending() { return !!MY_APP && (MY_APP.status === "submitted" || MY_APP.status === "reviewing"); }
 function appStatusLine() {
@@ -3070,6 +3073,55 @@ function vAdmin() {
     '</div></section>';
 }
 
+/* =============================================================== LEGAL ==== */
+var LEGAL = {
+  terms: { title: "Terms of Service", sections: [
+    ["Who we are", ["Founder's University is operated by Sophic LLC (we, us). By creating an account, submitting an application or making a purchase you agree to these terms."]],
+    ["What the programme is", ["Founder's University is an educational programme. Nothing in it is legal, tax, accounting, financial or investment advice.", "We do not promise or guarantee any business outcome, income or result. What you do with the material is your own decision and responsibility."]],
+    ["Applications and accounts", ["Enrolment is by application. We may accept or decline any application at our discretion.", "You must be at least 18 years old. An account is for one person; keep your sign-in details private and tell us if you believe someone else has used them."]],
+    ["Payment", ["Prices are shown in US dollars before you pay. Payments are one-time and are processed by Stripe. Access begins when your payment is confirmed."]],
+    ["No refunds", ["All sales are final. See the Refund Policy, which forms part of these terms."]],
+    ["Your access", ["Paying for the programme gives you a personal, non-transferable right to use it. You may not copy, share, resell, publish or scrape the lessons, questions, answers, simulations or any other part of it, or let anyone else use your account."]],
+    ["Your work", ["Your application answers and the work you produce remain yours. You allow us to store and process them so that we can run the programme."]],
+    ["Suspension", ["We may suspend or end access if these terms are broken. No refund is due in that case."]],
+    ["Changes and availability", ["We may update the curriculum, features and these terms. The programme is provided as it is, and we do not guarantee that it will always be available or free of errors."]],
+    ["Liability", ["To the extent the law allows, we are not liable for indirect or consequential loss, or for lost profits or revenue, and our total liability to you is limited to the amount you paid us."]],
+    ["Governing law", ["These terms are governed by the laws of the State of California, USA."]],
+    ["Contact", ["For questions about these terms, use the contact details shown on your payment receipt."]]
+  ] },
+  refunds: { title: "Refund Policy", sections: [
+    ["All sales are final", ["Sophic LLC does not offer refunds, returns, credits or exchanges on any purchase from Founder's University, including the Founder Fit assessment and tuition.", "This applies whether or not you use the programme, finish it, or change your mind after paying."]],
+    ["Before you pay", ["Eight lessons are open to everyone without payment. Please use them to decide whether the programme is right for you before you buy."]],
+    ["Billing errors", ["If you were charged twice for the same purchase, or charged an amount different from the price shown, contact us using the details on your payment receipt and we will correct it."]],
+    ["Your legal rights", ["Nothing in this policy removes any right you have under a law that cannot be waived."]]
+  ] },
+  privacy: { title: "Privacy Policy", sections: [
+    ["Who is responsible", ["Founder's University is operated by Sophic LLC."]],
+    ["What we collect", ["Account details: your email address, the name you give us and your password, which is stored in hashed form by our sign-in provider.", "Application answers and the track you choose.", "Your activity in the programme: lessons completed, quiz attempts, simulation results and Founder Fit answers.", "Purchases: when you pay, Stripe handles your card details. We receive confirmation of the payment, the amount and Stripe's reference numbers. We never see or store your card number."]],
+    ["How we use it", ["To run your account, review your application, give you access to what you have paid for, save your progress across devices and contact you about your application or account."]],
+    ["Where it is kept", ["Account and programme data is stored with Supabase. The site is served by GitHub Pages, which may log your IP address. Your browser also keeps your progress and sign-in session in local storage on your device."]],
+    ["Sharing", ["We do not sell your personal information. We share it only with the service providers named above, and where the law requires."]],
+    ["Your choices", ["You can ask us for a copy of your data or to delete your account, using the contact details shown on your payment receipt."]],
+    ["Changes", ["We will update this page if what we collect or how we use it changes."]]
+  ] }
+};
+function vLegal(kind) {
+  var d = LEGAL[kind];
+  if (!d) return notFound();
+  return '<section style="padding-top:56px"><div class="narrow">' +
+    '<div class="eyebrow">Founder&#39;s University</div>' +
+    '<h1 style="font-size:clamp(28px,4.6vw,44px);margin-bottom:8px">' + esc(d.title) + '</h1>' +
+    '<p class="small">Last updated 17 November 2026</p>' +
+    d.sections.map(function (sec) {
+      return '<h3 style="font-size:20px;margin:30px 0 10px">' + esc(sec[0]) + '</h3>' +
+        sec[1].map(function (t) { return '<p style="color:var(--fg-2);margin:0 0 12px">' + esc(t) + '</p>'; }).join("");
+    }).join("") +
+    '<p class="small" style="margin-top:34px"><a href="#/terms" style="color:var(--gold-2)">Terms</a> &middot; ' +
+      '<a href="#/refunds" style="color:var(--gold-2)">Refund Policy</a> &middot; ' +
+      '<a href="#/privacy" style="color:var(--gold-2)">Privacy</a></p>' +
+    '</div></section>';
+}
+
 function notFound() {
   return '<section style="padding-top:80px"><div class="narrow" style="text-align:center">' +
     '<h1 style="font-size:44px;margin-bottom:14px">Not found</h1>' +
@@ -3110,6 +3162,7 @@ function render() {
     case "certificate": v = vCert(); break;
     case "glossary": v = vGlossary(p.q); break;
     case "search": v = vSearch(p.q); break;
+    case "terms": case "refunds": case "privacy": v = vLegal(p.r); break;
     default: v = notFound();
   }
   document.getElementById("app").innerHTML =
