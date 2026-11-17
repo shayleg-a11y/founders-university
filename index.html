@@ -713,6 +713,56 @@ function submitApplication(row) {
   return ins("applications", [row], "return=minimal");
 }
 
+/* -------------------------------------------------- admissions / admin --- */
+function rpc(name, args) {
+  return authed("/rest/v1/rpc/" + name, { method: "POST", body: args || {} });
+}
+// Asks the server; the allow-list itself is never readable from the client.
+function amAdmin() {
+  if (!signedIn()) return Promise.resolve(false);
+  return rpc("am_admin").then(function (r) { return r === true; }).catch(function () { return false; });
+}
+// Newest application belonging to the signed-in user (by account or by email).
+// Filtered explicitly because an admin's read policy returns everyone's rows.
+function myApplication() {
+  var u = currentUser();
+  if (!signedIn() || !u) return Promise.resolve(null);
+  var own = "user_id.eq." + u.id;
+  if (u.email) own += ',email.eq."' + String(u.email).toLowerCase().replace(/["\\]/g, "") + '"';
+  return sel("applications", "select=id,status,created_at,decided_at,track&or=" +
+      encodeURIComponent("(" + own + ")") + "&order=created_at.desc&limit=1")
+    .then(function (r) { return r && r[0] ? r[0] : null; })
+    .catch(function () { return null; });
+}
+function adminApplications() {
+  return sel("applications", "select=*&order=created_at.desc&limit=500");
+}
+function adminDecide(id, status) {
+  var decided = status === "accepted" || status === "declined";
+  return authed("/rest/v1/applications?id=eq." + encodeURIComponent(id), {
+    method: "PATCH",
+    headers: { Prefer: "return=representation" },
+    body: { status: status, decided_at: decided ? new Date().toISOString() : null }
+  }).then(function (r) {
+    if (!r || !r[0]) throw new Error("Not permitted");
+    return r[0];
+  });
+}
+function adminStudents() {
+  return Promise.all([
+    sel("profiles", "select=id,email,display_name,track,created_at&order=created_at.desc&limit=1000"),
+    sel("entitlements", "select=user_id,tier,status,source,granted_at&order=granted_at"),
+    sel("lesson_progress", "select=user_id")
+  ]).then(function (r) {
+    var ents = {}, done = {};
+    (r[1] || []).forEach(function (e) { (ents[e.user_id] = ents[e.user_id] || []).push(e); });
+    (r[2] || []).forEach(function (x) { done[x.user_id] = (done[x.user_id] || 0) + 1; });
+    return (r[0] || []).map(function (p) {
+      p.entitlements = ents[p.id] || []; p.lessons_done = done[p.id] || 0; return p;
+    });
+  });
+}
+
 return {
   url: URL_BASE,
   signUp: signUp, signIn: signIn, signOut: signOut, resetPassword: resetPassword,
@@ -722,7 +772,9 @@ return {
   entitlements: entitlements, loadProgress: loadProgress,
   markLesson: markLesson, recordQuiz: recordQuiz, recordSim: recordSim,
   setMilestone: setMilestone, saveFit: saveFit, saveProfile: saveProfile,
-  submitApplication: submitApplication
+  submitApplication: submitApplication,
+  amAdmin: amAdmin, myApplication: myApplication,
+  adminApplications: adminApplications, adminDecide: adminDecide, adminStudents: adminStudents
 };
 })();
 
@@ -1670,6 +1722,13 @@ var TOTAL_MIN = 0, TOTAL_Q = 144;
 var BODIES = {};
 var ANSWERS = {};
 var ENTITLED = { "founder-fit": false, "university": false };
+// Admissions state for the signed-in account. All three are decided by the
+// server (row level security); the client only mirrors what it was allowed to read.
+var IS_ADMIN = false;   // may this account open #/admin
+var MY_APP = null;      // this account's newest application, or null
+var ADMIN = null;       // null = not loaded, "loading", or { apps, students, error }
+var applyAgain = false; // a declined applicant chose to re-apply
+var authPrefill = "";   // email carried from the application into sign-up
 
 function rebuildIndex() {
   SCHOOLS = SCHOOL_ORDER.filter(function (k) { return C[k]; }).map(function (k) { return C[k]; });
@@ -1803,6 +1862,16 @@ function payButton(tier, cls) {
     return '<button class="btn btn-ghost btn-sm" data-go="' + esc(t.returns) + '">' +
       '&#10003; Purchased &mdash; continue</button>';
   }
+  if (tier === "university") {
+    // Tuition is offered only to accepted applicants.
+    if (appPending()) return '<button class="btn btn-ghost btn-sm" data-go="#/apply">Application under review</button>';
+    if (!MY_APP || MY_APP.status !== "accepted") {
+      return '<button class="btn ' + (cls || "btn-ghost") + ' btn-sm" data-go="#/apply">Apply</button>';
+    }
+    if (!link) {
+      return '<span class="small" id="pay-soon" style="color:var(--ok);align-self:center">Accepted. Tuition payment opens shortly.</span>';
+    }
+  }
   if (!link) {
     return '<button class="btn ' + (cls || "btn-ghost") + ' btn-sm" data-go="#/apply">Apply</button>';
   }
@@ -1856,6 +1925,7 @@ function nav() {
     '<a class="brand" href="#/"><span class="crest">F</span><b>Founder&#39;s <i>University</i></b></a>' +
     '<nav class="links" id="navlinks">' +
       NAV.map(function (n) { return '<a href="' + n[0] + '"' + (h.indexOf(n[0]) === 0 ? ' class="on"' : '') + '>' + n[1] + '</a>'; }).join("") +
+      (IS_ADMIN ? '<a href="#/admin" id="nav-admin"' + (h.indexOf("#/admin") === 0 ? ' class="on"' : '') + '>Admin</a>' : '') +
     '</nav>' +
     '<div class="nav-right">' +
       '<button class="btn btn-ghost btn-sm" data-go="#/search">Search</button>' +
@@ -2253,6 +2323,7 @@ function vLesson(id) {
       '<span class="chip">' + l.minutes + ' min</span>' +
       '<span class="chip">' + esc(s.short) + '</span></div>' +
     '<h1>' + esc(l.title) + '</h1>' + body +
+    (meta.is_free && !S.enrolled ? openLessonCard() : '') +
     '<div class="lesson-nav">' +
       (prev ? '<button class="btn btn-ghost" data-go="#/lesson/' + prev + '">&larr; Previous</button>' : '<span></span>') +
       '<button class="btn ' + (isDone(id) ? "btn-ghost" : "btn-gold") + '" id="mark">' +
@@ -2289,8 +2360,9 @@ function vQuiz(id) {
       'behind every answer. Marks are recorded against your account.</p>' +
       '<div style="display:flex;gap:10px;flex-wrap:wrap">' +
       (DB.signedIn() ? payButton("university", "btn-gold")
-                     : '<button class="btn btn-gold btn-sm" data-go="#/signin">Sign in</button>') +
-      '</div></div></div></section>';
+                     : '<button class="btn btn-gold btn-sm" data-go="#/apply">Apply free</button>' +
+                       '<button class="btn btn-ghost btn-sm" data-go="#/signin">Sign in</button>') +
+      '</div>' + tuitionLine() + '</div></div></section>';
   }
 
   var qs = loaded;
@@ -2373,6 +2445,21 @@ function lockedLesson(meta, c, s) {
         'Eight lessons are open to everyone &mdash; ' +
         '<a href="#/library" style="color:var(--gold-2)">the opening lesson of each school</a>.</p>' +
     '</div></div>';
+}
+
+// Shown under an open lesson to anyone who is not enrolled.
+function openLessonCard() {
+  var open = ALL_LESSONS.filter(function (id) { return L[id] && L[id].lesson.is_free; }).length;
+  return '<div class="simcard" id="open-cta" style="margin-top:34px">' +
+    '<div class="eyebrow">Open lesson</div>' +
+    '<h3 style="font-size:22px;margin-bottom:10px">That was one of ' + open + ' open lessons</h3>' +
+    '<p style="color:var(--fg-2);max-width:60ch">The other ' + (ALL_LESSONS.length - open) + ' lessons, the graded assessments, ' +
+      'the simulations and the capstone are for enrolled students.</p>' +
+    '<div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:8px">' +
+      (DB.signedIn() ? payButton("university", "btn-gold")
+                     : '<button class="btn btn-gold btn-sm" data-go="#/apply">Apply free</button>' +
+                       '<button class="btn btn-ghost btn-sm" data-go="#/signin">Sign in</button>') +
+    '</div>' + tuitionLine() + '</div>';
 }
 
 function loadBody(id) {
@@ -2524,6 +2611,7 @@ function vDash() {
       (S.name ? esc(S.name) : "Your standing") + '</h1>' +
     '<p class="lede">Track: <b style="color:var(--gold-2)">' + esc(trackName) + '</b>' +
       (S.fit ? ' &middot; Founder Fit ' + S.fit.score + '%' : '') + '</p>' +
+    appStatusLine() +
 
     '<div class="stats" style="margin-top:30px">' +
       '<div><b>' + pp.p + '%</b><span>Core path</span></div>' +
@@ -2605,7 +2693,52 @@ function vDash() {
 }
 
 /* ============================================================== APPLY ==== */
+// Shared wording for the cost of the programme, always read from PAY.
+function tuitionLine() {
+  return '<p class="small" style="margin:14px 0 0">Tuition is $' + PAY.tiers.university.amount.toLocaleString() +
+    ', paid once. Applying is free.</p>';
+}
+function appPending() { return !!MY_APP && (MY_APP.status === "submitted" || MY_APP.status === "reviewing"); }
+function appStatusLine() {
+  if (!DB.signedIn() || !MY_APP || S.enrolled) return "";
+  var t = appPending() ? "under review" : MY_APP.status;
+  return '<p class="small" id="app-line" style="margin:10px 0 0">Application: <b style="color:var(--gold-2)">' + esc(t) +
+    '</b> &middot; <a href="#/apply" style="color:var(--gold-2)">View</a></p>';
+}
+function vApplyStatus() {
+  var st = MY_APP.status, body;
+  if (st === "accepted") {
+    body = '<div class="eyebrow">Accepted</div>' +
+      '<h3 style="font-size:24px;margin-bottom:12px">You have a place</h3>' +
+      '<p style="color:var(--fg-2);max-width:60ch">Your application was accepted' +
+        (MY_APP.decided_at ? ' on ' + esc(fmtDate(MY_APP.decided_at)) : '') +
+        '. Tuition is $' + PAY.tiers.university.amount.toLocaleString() + ', paid once, and unlocks the full programme on this account.</p>' +
+      '<div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:8px">' + payButton("university", "btn-gold") + '</div>';
+  } else if (st === "declined") {
+    body = '<div class="eyebrow">Decision</div>' +
+      '<h3 style="font-size:24px;margin-bottom:12px">Not this time</h3>' +
+      '<p style="color:var(--fg-2);max-width:60ch">Thank you for applying. We could not offer you a place on the strength of this application. ' +
+        'The eight open lessons stay available to you, and you are welcome to apply again when your business or your thinking has moved on.</p>' +
+      '<div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:8px">' +
+        '<button class="btn btn-gold btn-sm" id="ap-again">Apply again</button>' +
+        '<button class="btn btn-ghost btn-sm" data-go="#/library">Open lessons</button></div>';
+  } else {
+    body = '<div class="eyebrow">Under review</div>' +
+      '<h3 style="font-size:24px;margin-bottom:12px">Your application is with admissions</h3>' +
+      '<p style="color:var(--fg-2);max-width:60ch">Submitted ' + esc(fmtDate(MY_APP.created_at)) +
+        '. Applications are read personally and a decision arrives within 24 hours. It will appear here and on your Progress page.</p>' +
+      '<div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:8px">' +
+        '<button class="btn btn-gold btn-sm" data-go="#/library">Read the open lessons</button>' +
+        '<button class="btn btn-ghost btn-sm" data-go="#/fit">Founder Fit</button></div>';
+  }
+  return '<section style="padding-top:56px"><div class="narrow">' +
+    '<div class="eyebrow">Step one &middot; The application</div>' +
+    '<h1 style="font-size:clamp(28px,4.6vw,44px);margin-bottom:14px">Your application</h1>' +
+    '<div class="simcard" id="app-status" data-status="' + esc(st) + '" style="margin-top:26px">' + body + '</div>' +
+    '</div></section>';
+}
 function vApply() {
+  if (DB.signedIn() && MY_APP && !applyAgain) return vApplyStatus();
   return '<section style="padding-top:56px"><div class="narrow">' +
     '<div class="eyebrow">Step one &middot; The application</div>' +
     '<h1 style="font-size:clamp(28px,4.6vw,44px);margin-bottom:14px">Begin your application</h1>' +
@@ -2671,10 +2804,10 @@ function vAuth(mode) {
             : "Pick up wherever you left off.") + '</p>' +
     '<div class="card" style="margin-top:26px">' +
       (isUp ? '<label class="eyebrow mute">Your name</label>' +
-              '<input class="fld" id="au-name" placeholder="How you want to be addressed" autocomplete="name">' +
+              '<input class="fld" id="au-name" placeholder="How you want to be addressed" autocomplete="name" value="' + esc(S.name) + '">' +
               '<div style="height:16px"></div>' : '') +
       '<label class="eyebrow mute">Email</label>' +
-      '<input class="fld" id="au-email" type="email" autocomplete="email" placeholder="you@company.com">' +
+      '<input class="fld" id="au-email" type="email" autocomplete="email" placeholder="you@company.com" value="' + esc(authPrefill) + '">' +
       '<div style="height:16px"></div>' +
       '<label class="eyebrow mute">Password</label>' +
       '<input class="fld" id="au-pass" type="password" placeholder="' +
@@ -2791,6 +2924,102 @@ function vSearch(q) {
     '</div></div></section>';
 }
 
+/* ============================================================== ADMIN ==== */
+// Everything on this page is fetched under the admin's own session. If the
+// server does not consider the account an admin, the queries return nothing.
+var APP_STATUS = {
+  submitted: ["Submitted", "chip gold"], reviewing: ["Reviewing", "chip gold"],
+  accepted: ["Accepted", "chip ok"], declined: ["Declined", "chip"]
+};
+function fmtDate(iso) {
+  if (!iso) return "";
+  var d = new Date(iso);
+  return isNaN(d) ? "" : d.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
+}
+function loadAdmin() {
+  if (ADMIN === "loading") return;
+  ADMIN = "loading";
+  Promise.all([DB.adminApplications(), DB.adminStudents()]).then(function (r) {
+    ADMIN = { apps: r[0] || [], students: r[1] || [] };
+  }).catch(function (e) {
+    ADMIN = { apps: [], students: [], error: (e && e.message) || "Could not load" };
+  }).then(function () {
+    if (parse().r === "admin") { render._keepScroll = true; render(); }
+  });
+}
+function adminTotals() {
+  var a = ADMIN.apps, st = ADMIN.students;
+  function n(s) { return a.filter(function (x) { return x.status === s; }).length; }
+  var paid = st.filter(function (p) {
+    return p.entitlements.some(function (e) { return e.status === "active" && e.tier !== "founder-fit"; });
+  }).length;
+  return [["Applications", a.length], ["Pending", n("submitted") + n("reviewing")], ["Accepted", n("accepted")],
+          ["Students", st.length], ["Enrolled", paid]].map(function (t) {
+    return '<div class="card" style="padding:16px 18px"><b style="font-family:var(--serif);font-size:28px;color:var(--gold-2)">' +
+      t[1] + '</b><div class="small" style="margin-top:2px">' + t[0] + '</div></div>';
+  }).join("");
+}
+function adminAppCard(a) {
+  var st = APP_STATUS[a.status] || [a.status, "chip"];
+  var pending = a.status === "submitted" || a.status === "reviewing";
+  var id = esc(a.id);
+  return '<div class="card" id="app-' + id + '" data-status="' + esc(a.status) + '" style="margin-top:12px;padding:20px">' +
+    '<div style="display:flex;gap:10px;justify-content:space-between;align-items:flex-start;flex-wrap:wrap">' +
+      '<div style="min-width:0;flex:1 1 200px"><b style="font-size:17px;overflow-wrap:anywhere">' + esc(a.display_name || "No name given") + '</b>' +
+        '<div class="small" style="margin-top:3px;overflow-wrap:anywhere">' +
+          (a.email ? '<a href="mailto:' + esc(a.email) + '" style="color:var(--gold-2)">' + esc(a.email) + '</a>' : 'No email') +
+          ' &middot; ' + esc(a.track || "no track") + ' &middot; ' + esc(fmtDate(a.created_at)) + '</div></div>' +
+      '<span class="' + st[1] + '">' + esc(st[0]) + '</span></div>' +
+    '<div class="eyebrow mute" style="margin-top:16px">Business</div>' +
+    '<p style="margin:4px 0 0;color:var(--fg-2);overflow-wrap:anywhere;white-space:pre-wrap">' + esc(a.business || "\u2014") + '</p>' +
+    '<div class="eyebrow mute" style="margin-top:14px">Biggest constraint</div>' +
+    '<p style="margin:4px 0 0;color:var(--fg-2);overflow-wrap:anywhere;white-space:pre-wrap">' + esc(a.constraint_ || "\u2014") + '</p>' +
+    '<div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:16px;align-items:center">' +
+      (pending
+        ? '<button class="btn btn-gold btn-sm" data-decide="accepted" data-app="' + id + '">Accept</button>' +
+          '<button class="btn btn-ghost btn-sm" data-decide="declined" data-app="' + id + '">Decline</button>'
+        : '<span class="small">Decided ' + esc(fmtDate(a.decided_at)) + '</span>' +
+          '<button class="btn btn-ghost btn-sm" data-decide="reviewing" data-app="' + id + '">Reopen</button>') +
+    '</div></div>';
+}
+function adminStudentCard(p) {
+  var act = p.entitlements.filter(function (e) { return e.status === "active"; });
+  var access = p.entitlements.length
+    ? p.entitlements.map(function (e) { return e.tier + (e.status === "active" ? "" : " (" + e.status + ")"); }).join(", ")
+    : "No purchase";
+  return '<div class="card" style="margin-top:12px;padding:18px 20px">' +
+    '<div style="display:flex;gap:10px;justify-content:space-between;align-items:flex-start;flex-wrap:wrap">' +
+      '<div style="min-width:0;flex:1 1 200px"><b style="overflow-wrap:anywhere">' + esc(p.display_name || "No name") + '</b>' +
+        '<div class="small" style="margin-top:3px;overflow-wrap:anywhere">' + esc(p.email || "") + '</div></div>' +
+      '<span class="chip' + (act.length ? " ok" : "") + '">' + esc(access) + '</span></div>' +
+    '<div class="small" style="margin-top:10px">Track: ' + esc(p.track || "not set") + ' &middot; Joined ' + esc(fmtDate(p.created_at)) +
+      ' &middot; ' + p.lessons_done + ' lesson' + (p.lessons_done === 1 ? "" : "s") + ' done</div></div>';
+}
+function vAdmin() {
+  if (!IS_ADMIN) return notFound();
+  if (ADMIN === null) loadAdmin();
+  var head = '<section style="padding-top:56px"><div class="wrap">' +
+    '<div class="eyebrow">Admin</div>' +
+    '<h1 style="font-size:clamp(28px,4.6vw,44px);margin-bottom:10px">Admissions and students</h1>';
+  if (!ADMIN || ADMIN === "loading") {
+    return head + '<div class="card" style="margin-top:26px;text-align:center;padding:40px"><div class="small">Loading\u2026</div></div></div></section>';
+  }
+  return head +
+    '<p class="lede">Accepting an application lets that applicant pay tuition. Access itself is only ever granted by a completed payment.</p>' +
+    (ADMIN.error ? '<p class="small" style="color:var(--bad)">' + esc(ADMIN.error) + '</p>' : '') +
+    '<div id="adm-totals" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:10px;margin-top:26px">' +
+      adminTotals() + '</div>' +
+    '<div style="display:flex;justify-content:space-between;align-items:center;gap:10px;margin-top:38px;flex-wrap:wrap">' +
+      '<h2 style="font-size:24px;margin:0">Applications</h2>' +
+      '<button class="btn btn-ghost btn-sm" id="adm-refresh">Refresh</button></div>' +
+    '<div id="adm-apps">' + (ADMIN.apps.length ? ADMIN.apps.map(adminAppCard).join("")
+      : '<div class="card" style="margin-top:12px"><p class="small" style="margin:0">No applications yet.</p></div>') + '</div>' +
+    '<h2 style="font-size:24px;margin:38px 0 0">Students</h2>' +
+    '<div id="adm-students">' + (ADMIN.students.length ? ADMIN.students.map(adminStudentCard).join("")
+      : '<div class="card" style="margin-top:12px"><p class="small" style="margin:0">No accounts yet.</p></div>') + '</div>' +
+    '</div></section>';
+}
+
 function notFound() {
   return '<section style="padding-top:80px"><div class="narrow" style="text-align:center">' +
     '<h1 style="font-size:44px;margin-bottom:14px">Not found</h1>' +
@@ -2827,6 +3056,7 @@ function render() {
     case "tracks": v = vTracks(); break;
     case "dashboard": v = vDash(); break;
     case "apply": v = vApply(); break;
+    case "admin": v = vAdmin(); break;
     case "certificate": v = vCert(); break;
     case "glossary": v = vGlossary(p.q); break;
     case "search": v = vSearch(p.q); break;
@@ -2973,9 +3203,37 @@ function bind() {
       return;
     }
 
+    if (ev.target.closest("#ap-again")) { applyAgain = true; render(); return; }
+    if (ev.target.closest("#adm-refresh")) { ADMIN = null; render._keepScroll = true; render(); return; }
+
+    var dc = ev.target.closest("[data-decide]");
+    if (dc) {
+      if (!IS_ADMIN || !ADMIN || !ADMIN.apps || dc.disabled) return;
+      var aid = dc.getAttribute("data-app"), nst = dc.getAttribute("data-decide");
+      var setBusy = function (on) {
+        var box = document.getElementById("app-" + aid);
+        if (box) Array.prototype.forEach.call(box.querySelectorAll("[data-decide]"), function (x) { x.disabled = on; });
+      };
+      setBusy(true);
+      DB.adminDecide(aid, nst).then(function (row) {
+        var rec = ADMIN.apps.filter(function (a) { return a.id === aid; })[0];
+        if (rec) { rec.status = row.status; rec.decided_at = row.decided_at; }
+        // Swap just this card and the totals; a full render would replay the page fade.
+        var cur = document.getElementById("app-" + aid);
+        if (cur && rec) cur.outerHTML = adminAppCard(rec);
+        var tot = document.getElementById("adm-totals");
+        if (tot) tot.innerHTML = adminTotals();
+        toast(nst === "accepted" ? "Application accepted" : nst === "declined" ? "Application declined" : "Application reopened");
+      }).catch(function (e) {
+        setBusy(false);
+        toast("Could not save: " + ((e && e.message) || "try again"));
+      });
+      return;
+    }
+
     if (ev.target.closest("#ap-submit")) {
       var nm = (document.getElementById("ap-name") || {}).value || "";
-      var apEm = ((document.getElementById("ap-email") || {}).value || "").trim();
+      var apEm = ((document.getElementById("ap-email") || {}).value || "").trim().toLowerCase();
       if (!DB.signedIn() && !/^\S+@\S+\.\S+$/.test(apEm)) { toast("Enter an email so we can send your decision."); return; }
       S.name = nm.trim(); if (!S.track) S.track = "foundation";
       if (!S.started) S.started = Date.now();
@@ -2986,8 +3244,21 @@ function bind() {
         business: (document.getElementById("ap-1") || {}).value || null,
         constraint_: (document.getElementById("ap-2") || {}).value || null,
         track: S.track
+      }).then(function () {
+        // Read the stored row back so the status panel reflects the server.
+        if (!DB.signedIn()) return null;
+        return DB.myApplication().then(function (a) {
+          if (a) MY_APP = a;
+          if (parse().r === "apply" || parse().r === "dashboard") { render._keepScroll = true; render(); }
+        });
       }).catch(function () { /* application is best-effort; never block the visitor */ });
-      if (DB.signedIn()) DB.saveProfile({ display_name: S.name, track: S.track });
+      applyAgain = false;
+      if (DB.signedIn()) {
+        MY_APP = { status: "submitted", created_at: new Date().toISOString(), decided_at: null, track: S.track };
+        DB.saveProfile({ display_name: S.name, track: S.track });
+      } else {
+        authPrefill = apEm;
+      }
       go(DB.signedIn() ? "#/path" : "#/signup");
       toast("Application received" + (S.name ? ", " + S.name : "") + ". The open lessons are ready now.");
       return;
@@ -2997,6 +3268,7 @@ function bind() {
       var em = (document.getElementById("au-email") || {}).value || "";
       var pw = (document.getElementById("au-pass") || {}).value || "";
       var nm = (document.getElementById("au-name") || {}).value || "";
+      authPrefill = em.trim();
       if (!em.trim() || !pw) { authMsg = "!Enter your email and a password."; render._keepScroll = true; render(); return; }
       if (authMode === "up" && pw.length < 8) { authMsg = "!Use at least 8 characters."; render._keepScroll = true; render(); return; }
       authBusy = true; authMsg = ""; render._keepScroll = true; render();
@@ -3103,6 +3375,7 @@ window.addEventListener("fu:signout", function () {
   S = JSON.parse(JSON.stringify(DEFAULT));
   BODIES = {}; ANSWERS = {};
   ENTITLED = { "founder-fit": false, "university": false };
+  IS_ADMIN = false; MY_APP = null; ADMIN = null; applyAgain = false; authPrefill = "";
   quizState = null; fitState = null;
   save();
   render();
@@ -3130,10 +3403,12 @@ window.addEventListener("keydown", function (e) {
 function syncFromServer() {
   if (!DB.signedIn()) {
     ENTITLED = { "founder-fit": false, "university": false };
+    IS_ADMIN = false; MY_APP = null; ADMIN = null;
     return Promise.resolve();
   }
-  return Promise.all([DB.entitlements(), DB.loadProgress()]).then(function (r) {
+  return Promise.all([DB.entitlements(), DB.loadProgress(), DB.amAdmin(), DB.myApplication()]).then(function (r) {
     var ents = r[0] || [], prog = r[1];
+    IS_ADMIN = r[2] === true; MY_APP = r[3] || null; ADMIN = null;
     ENTITLED = { "founder-fit": false, "university": false };
     ents.forEach(function (e) {
       if (e.tier === "partner") { ENTITLED["founder-fit"] = ENTITLED.university = true; }
